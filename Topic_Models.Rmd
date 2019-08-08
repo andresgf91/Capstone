@@ -1,0 +1,318 @@
+---
+title: "TOPIC_MODELS"
+author: "Andres Ignacio"
+date: "8/5/2019"
+output: pdf_document
+editor_options: 
+  chunk_output_type: console
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+
+
+```{r}
+setwd("~/Library/Mobile Documents/com~apple~CloudDocs/Capstone")
+library(DBI)
+SQL_path <- "Data/SQL_TEXAS_HARVEY.sqlite"
+db <- dbConnect(RSQLite::SQLite(), SQL_path)
+
+dbListTables(db)
+dbListFields(db,'lwic')
+
+
+text_df <- dbGetQuery(db,"SELECT clean_text as text, id_str, created_at, user_county FROM new_target_tweets")
+
+
+text_pandas <- function(df){
+  source("~/Library/Mobile Documents/com~apple~CloudDocs/Capstone/R_code/Real_Deal_Functions.R")
+    require(lubridate)
+  #convert date column to time format
+  message("Converting date field to appropiate format")
+  df$created_at <- as_date(df$created_at)
+  message("Filtering dates")
+  df <- df %>%  
+  filter(created_at> as_date('2016-08-23'),
+         created_at< as_date('2018-08-26'))
+
+  #assign week
+  message("Creating week(date) column")
+  df$week <- df$created_at %>% floor_date(unit='week',week_start = 1)
+  #identify disaster affected counties as per FEMA (this adds a column called `affected` to df)
+  df <- apply_disaster_no_date(df)
+return(df)}
+
+
+text_df <- text_pandas(text_df)
+
+text_df  <- text_df  %>%
+  select(text,affected,week) %>%
+  filter(affected=='affected')
+
+library("data.table")
+dt <- as.data.table(text_df)
+dt <- dt[, list(text = paste(text, collapse="")), by = week]
+
+dt <- as.data.frame(dt)
+
+names(dt)
+
+write.csv(dt,"~/Library/Mobile Documents/com~apple~CloudDocs/Capstone/Data/LDA/text_weekly_4_empath.csv")
+
+library(rjson)
+x <- toJSON(unname(split(dt, 1:1)))
+cat(x)
+
+library(jsonlite)
+jsonlite::write_json(dt,path = "~/Library/Mobile Documents/com~apple~CloudDocs/Capstone/Data/LDA/text_weekly_4_empath.json")
+
+
+library(quanteda)
+text <- test_df %>% corpus() %>% tokens(include_docvars = TRUE)
+
+text <- tokens_group(text,group='created_at')
+save(text,file='text_for_empat.rda')
+
+
+
+#-------COSTUM DF-----------
+library(dplyr)
+library(lubridate)
+df<- read.csv("~/Library/Mobile Documents/com~apple~CloudDocs/Capstone/Data/LDA/text_weekly_empath_results_costum.csv",stringsAsFactors = F)
+
+df <- t(df)
+df <- df %>% as.data.frame(stringsAsFactors = F)
+cat_names <- df[1,] %>% as.vector()
+colnames(df) <- cat_names
+df <- df[2:nrow(df),]
+df$date <- df %>% rownames()
+df$date <- df$date %>% stringi::stri_sub(2)
+df$date <- df$date %>% as_date()
+
+costum_df <- df
+
+#______-MAIN DF_______
+df<- read.csv("~/Library/Mobile Documents/com~apple~CloudDocs/Capstone/Data/LDA/text_weekly_empath_results.csv",stringsAsFactors = F)
+
+df <- t(df)
+library(dplyr)
+df <- df %>% as.data.frame(stringsAsFactors = F)
+
+cat_names <- df[1,] %>% as.vector()
+colnames(df) <- cat_names
+df <- df[2:nrow(df),]
+df$date <- df %>% rownames()
+df$date <- df$date %>% stringi::stri_sub(2)
+
+library(lubridate)
+df$date <- df$date %>% as_date()
+df <- left_join(df,costum_df,by='date')
+
+options(scipen=999)
+
+plot_EMPATH <- function (metric){
+require(ggplot2)
+  df$metric <- df[[metric]]
+  df %>% ggplot(aes(x=date,y=scales::rescale(as.numeric(metric),to=c(1,100)))) +
+  geom_line()+
+  stat_smooth(span=0.5) +
+  theme_classic() +
+  geom_vline(xintercept = as_date("2017-08-24"),col='red',linetype=2) +
+  labs(title=paste("EMPATH -",toupper(metric)),x="Week",y="Value")
+}
+
+save_pics<- function(gg,name){
+require(png)
+  path <- "~/Library/Mobile Documents/com~apple~CloudDocs/Capstone/Figures/"
+  pic_name<- paste0(path,name,".png")
+    
+  png(pic_name,units="in", width=8, height=5,res=1200, pointsize = 14)
+    print(gg)
+    dev.off()
+}
+
+df <- costum_df
+names(df)
+
+gg <-plot_EMPATH('crime')
+gg <- plot_EMPATH('health')
+gg <-plot_EMPATH('temporary_housing')
+
+save_pics(gg,"EMPATH/temporary_housing")
+
+
+gg <- plot_EMPATH('injury')
+save_pics(gg,"EMPATH/injury")
+
+gg <- plot_EMPATH('house_repairs')
+save_pics(gg,"EMPATH/house_repairs")
+gg <- plot_EMPATH('psych_counseling')
+save_pics(gg,"EMPATH/psych_counseling")
+
+#EXERCISE 
+gg <- plot_EMPATH('exercise')
+save_pics(gg,"EMPATH/exercise")
+
+gg <- plot_EMPATH('insurance')
+save_pics(gg,"EMPATH/insurance")
+
+
+# folder_path <- "Data/Embeddings/Sub_dataframes/"
+# files <- list.files(folder_path)
+# ls <- list()
+# for (i in files){
+#   file_path <- paste0(folder_path,i)
+#   load(file_path)
+#   ls[[i]] <- embed_df
+#   rm(embed_df)
+# }
+# 
+# embed_df <- do.call(rbind,ls)
+# embed_df <- distinct(embed_df)
+# 
+# dbWriteTable(db,'embeddings_df',embed_df)
+
+```
+
+
+
+```{r}
+library(lubridate)
+library(dplyr)
+df <- dbGetQuery(db,"SELECT V.id_str,V.created_at,V.user_county,M.clean_text
+FROM [new_target_tweets] M JOIN vader_GI_RID_NRC V ON V.id_str=M.id_str
+JOIN lwic on M.id_str=lwic.id_str
+WHERE V.`EMOTIONS.ANXIETY` > 0 OR lwic.anx>0")
+
+
+# nrow(df)
+ #df$created_at <- lubridate::as_date(df$created_at)
+ #df %>% filter(created_at>as_date('2017-08-15')) %>% nrow()
+ #sub_df <- df %>% filter(created_at>as_date('2017-08-15')) %>% mutate(id_str=as.numeric(id_str))
+#sub_df <- sub_df %>% rename('text'=clean_text)
+# 
+# test <- lda_df[,5:length(lda_df)] %>% as.matrix() %>%
+#   scales::rescale(to=c(0,200)) %>%
+#   as.data.frame() 
+# 
+# test <- lapply(test, as.integer) %>% as.data.frame()
+# test <- test[rowSums(test)!=0,]
+list_to_remove <- c(stopwords('en'),'e2','a6',"b8","a3",'ok','amp',
+                  'get','8f','8d','9d','a4','9fs',
+                  'ur','things','a0','re','u','ii','w','bc','ef','also',
+                  '9f','s','9c','bd','t','gt','bb','m','c2','bag','see',
+                  'f0','don','yo','via','hey','dm','twitter','go','read','say','wings',
+                  'e3','biceps','b7','points','a2','hands','c3','a9',
+                  'per','fist','ad','bf','make','take','like','just','every',
+                  'says','thank','can','us','one','face','y','tho','f')
+
+
+prepare_lda_dfm <- function (df,min_docs=4){
+  require(lubridate)
+  require(dplyr)
+   df$created_at <- lubridate::as_date(df$created_at)
+  sub_df <- df %>%filter(created_at>as_date('2017-08-15')) %>%
+    mutate(id_str=as.numeric(id_str))
+  sub_df <- sub_df %>% rename('text'=clean_text)
+  require(quanteda)
+  lda_dfm <- sub_df %>% corpus() %>%
+  dfm(remove_punct=TRUE,remove=list_to_remove,remove_numbers=TRUE)
+  lda_dfm <- dfm_trim(lda_dfm,min_docfreq = min_docs)
+  lda_dfm <- dfm_tfidf(lda_dfm) %>% round()
+  lda_dfm <- lda_dfm[quanteda::rowSums(lda_dfm)>0,]
+    return(lda_dfm)
+}
+
+lda_dfm <- prepare_lda_dfm(df,min_docs = 2)
+
+topfeatures(lda_dfm,25)
+```
+
+
+
+```{r}
+
+library(topicmodels)
+K <- seq(2,60,1)
+lda2 <- lapply(K, function(x)
+  LDA(lda_dfm,
+      k = x,
+      method = "Gibbs",
+      control = list(verbose=50L, seed = 123, burnin = 100, iter = 400)))
+
+loglikelihood <- unlist(lapply(seq(1, length(lda2), 1), function(i)
+  lda2[[i]]@loglikelihood))
+
+plot(loglikelihood)
+
+results_sad_2 <- list(models=lda2,logs=loglikelihood)
+path <- "~/Library/Mobile Documents/com~apple~CloudDocs/Capstone/Data/LDA/sad_LDA_results_35-60.rda"
+save(results_sad_2,file=path)
+
+
+terms <- get_terms(lda,60)
+topics <- get_topics(lda[[60]], 1)
+
+pandas <- docvars(lda_dfm)
+pandas$topic <- NA
+
+for (i in 1:nrow(pandas)){
+  
+  pandas$topic[i]<- lda@gamma[i,] %>% which.max()
+  if (i %% 2000 ==0) {message(round(i/nrow(pandas),2))}
+}
+
+terms <- as.data.frame(terms)
+topics <- pandas %>% group_by(topic) %>% summarise(count=n()) %>% arrange(-count)
+
+#`PREPARE DF FOR TOPICS TO RUN IN EMPATH 
+topics <- topics$topic[1:25]
+anxiety_pandas <- terms[topics]
+
+#SAVE TOP TERMS FROM TOPICS TO RUN IN EMPATH 
+head(anxiety_pandas)
+write.csv(anxiety_pandas,file="~/Library/Mobile Documents/com~apple~CloudDocs/Capstone/Data/LDA/anxiety_pandas.csv")
+```
+
+
+```{r}
+df <- dbGetQuery(db,"SELECT V.id_str,V.created_at,V.user_county,M.clean_text
+FROM [new_target_tweets] M JOIN vader_GI_RID_NRC V ON V.id_str=M.id_str
+JOIN lwic on M.id_str=lwic.id_str
+WHERE lwic.sad > 0 OR V.sadness >0")
+
+dbDisconnect(db)
+
+lda_dfm <- prepare_lda_dfm(df,min_docs = 6)
+
+topfeatures(lda_dfm,25)
+notify_me("LDA 36-60 complete")
+
+
+```
+
+
+```{r}
+
+df <- dbGetQuery(db,"SELECT P.ids as id_str, M.user_county, M.created_at, M.clean_text
+                   FROM [vader_GI_RID_NRC] S
+                   JOIN socio_econ_preds P ON 
+                   S.id_str=P.ids
+                   JOIN new_target_tweets M ON 
+                   M.id_str=S.id_str
+                   JOIN lwic on lwic.id_str=S.id_str
+                 WHERE P.prediction > 0.5 AND lwic.negemo > 0")
+
+
+results_2 <- list(models=lda,logs=loglikelihood)
+path <- "~/Library/Mobile Documents/com~apple~CloudDocs/Capstone/Data/LDA/econ_negemo_LDA_results_1.rda"
+save(results_2,file=path)
+
+#SAVE TOP TERMS FROM TOPICS TO RUN IN EMPATH 
+SE_pandas <- terms[topics]
+write.csv(SE_pandas,file="~/Library/Mobile Documents/com~apple~CloudDocs/Capstone/Data/LDA/SE_pandas.csv")
+
+```
+

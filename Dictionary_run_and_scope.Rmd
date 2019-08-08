@@ -1,0 +1,687 @@
+---
+title: "Initial Scoping Capstone Harvey"
+author: "Andres Ignacio"
+date: "7/1/2019"
+output: html_document
+editor_options: 
+  chunk_output_type: console
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+library(dplyr)
+library(stringi)
+library(DBI)
+library(ggplot2)
+```
+
+```{r PLOTS BOTS AND TIME DISTRIBUTION, warning=FALSE, cache=TRUE}
+library(DBI)
+#load df with only variables needed
+SQL_path <- "~/Capstone/Data/SQL_TEXAS_HARVEY.sqlite"
+db <- dbConnect(RSQLite::SQLite(), SQL_path)
+df <- dbGetQuery(db,"SELECT id_str,created_at,user_id_str,user_county FROM new_target_tweets")
+dbDisconnect(db)
+
+# filter out bots
+botometer_results <- read.csv("~/Capstone/Data/botometer_2.csv")
+non_bots <- botometer_results %>% filter(english_score < 0.5)
+bots <- botometer_results %>% filter(english_score >= 0.5)
+
+botometer_results$bot_or_not <- ifelse(botometer_results$english_score >= 0.5,'yes','no')
+
+library(ggplot2)
+
+#plot barplot for bot or not users based on botometer algorithms
+bot_gg <- botometer_results %>% ggplot(aes(x=bot_or_not, fill=bot_or_not)) +
+  geom_bar(alpha=.7) + scale_fill_manual(values=c("blue","red"), name="Is bot?") +
+  theme_classic() + labs(title="Number of texas users identified as bot/non-bots")
+
+df$created_at <- as.Date(df$created_at)
+
+#plot time distribution of tweets
+all_tweet_time_gg <- df %>% select(created_at) %>% ggplot(aes(created_at)) +
+  geom_density(fill='lightblue', alpha=.5, col='lightblue') + theme_classic() +
+  labs(title='Distribution of tweets post time for all texas',
+       subtitle = "(dotted line indicates day Hurricane Harvey made landfall)",
+       x="Post Date",
+       y="Density") +
+    geom_vline(xintercept = as.Date("2017-08-25"), linetype = 4,col='blue') 
+
+```
+
+
+```{r Prepare QUANTEDA OBJECTS, cache=TRUE}
+library(DBI)
+library(dplyr)
+library(textclean)
+library(quanteda)
+library(quanteda.dictionaries)
+
+#devtools::install_github("gaborcsardi/notifier")
+notify_me <- function (Title = "Code Finished Running",
+                       MSG = 'Check to see if all ok', 
+                       Sound = 10) {
+  require(notifier)
+  require(beepr)
+
+beep(sound = Sound)
+notify(title = Title,
+       msg = MSG) 
+}
+
+
+#load sample Data Frame from SQL database
+library(DBI)
+#load df with only variables needed
+SQL_path <- "~/Capstone/Data/SQL_TEXAS_HARVEY.sqlite"
+db <- dbConnect(RSQLite::SQLite(), SQL_path)
+df <- dbGetQuery(db,"SELECT clean_text, id_str, created_at
+                 FROM new_target_tweets")
+dbDisconnect(db)
+
+#create quanteda objects
+dict_corpus <- corpus(df,text_field = "clean_text",
+                      docid_field = 'id_str')
+
+notify_me('Corpus Object Created')
+
+dict_tokens <- tokens(dict_corpus,
+                    remove_url = TRUE,
+                    remove_separators = TRUE)
+
+rm(dict_corpus)
+save(dict_tokens,file="~/Capstone/Data/dict_tokens.rda")
+notify_me('Tokens Object Created and Saved')
+
+
+```
+
+```{r NRC dictionary, cache=TRUE}
+library(quanteda.dictionaries)
+library(sentimentSetsR)
+library(ggplot2)
+library(lexicon)
+library(stringr)
+library(lubridate)
+library(quanteda)
+
+NRC_dfm <- dfm(dict_tokens,
+              remove = c(stopwords('en'),'rt'),
+              dictionary = data_dictionary_NRC) %>% 
+  dfm_weight(scheme='prop')
+
+notify_me('NRC_dfm Created')
+
+NRC_df <- convert(NRC_dfm,to='data.frame')
+NRC_df$created_at <- docvars(NRC_dfm)$created_at
+NRC_df$user_county <- docvars(NRC_dfm)$user_county
+notify_me('NRC_df Created, with dates')
+rm(NRC_dfm)
+
+save(NRC_df,file='~/Capstone/Data/NRC_df.rda')
+rm(NRC_df)
+
+load('~/Capstone/Data/NRC_df.rda')
+names(NRC_df)
+
+library(dplyr)
+NRC_df <- NRC_df %>% select(-c(created_at,user_county)) %>% rename('id_str'=document)
+
+library(DBI)
+#load df with only variables needed
+SQL_path <- "~/Capstone/Data/SQL_TEXAS_HARVEY.sqlite"
+db <- dbConnect(RSQLite::SQLite(), SQL_path)
+
+vader_df<- dbGetQuery(db,"SELECT * FROM VADER")
+dbWriteTable(db,'NRC',NRC_df,overwrite=TRUE)
+dbDisconnect(db)
+
+vader_df$id_str <- vader_df$id_str %>% as.numeric() %>% as.character()
+
+
+library(DBI)
+#load df with only variables needed
+SQL_path <- "~/Capstone/Data/SQL_TEXAS_HARVEY.sqlite"
+db <- dbConnect(RSQLite::SQLite(), SQL_path)
+dbWriteTable(db,'vader',vader_df,overwrite=TRUE)
+
+df_test <- inner_join(NRC_df,vader_df,by='id_str')
+
+df_test %>% nrow()
+
+source("~/Capstone/R_code/Real_Deal_Functions.R")
+
+
+# plot_GI(NRC_df,'anger','created_at', UPPERCASE = FALSE)
+# plot_GI(NRC_df,'anticipation','document', UPPERCASE = FALSE)
+# plot_GI(NRC_df,'disgust','document', UPPERCASE = FALSE)
+# plot_GI(NRC_df,'fear','document', UPPERCASE = FALSE)
+# plot_GI(NRC_df,'joy','document', UPPERCASE = FALSE)
+# plot_GI(NRC_df,'negative','document', UPPERCASE = FALSE)
+# plot_GI(NRC_df,'positive','document', UPPERCASE = FALSE)
+# plot_GI(NRC_df,'sadness','document', UPPERCASE = FALSE)
+# plot_GI(NRC_df,'surprise','document', UPPERCASE = FALSE)
+# plot_GI(NRC_df,'trust','document', UPPERCASE = FALSE)
+
+
+# anger_POS <- which(NRC_df$anger >0)
+
+```
+
+```{r, MORAL FOUNDATIONS}
+MFD_dfm <- dfm(dict_tokens,
+              remove = c(stopwords('en'),'rt','https'),
+              dictionary = data_dictionary_MFD) %>% 
+  dfm_weight(scheme='prop')
+
+MFD_df <- convert(MFD_dfm,to='data.frame')
+MFD_df$created_at <- docvars(MFD_dfm)$created_at
+MFD_df$user_county <- docvars(MFD_dfm)$user_county
+notify_me('MFD_df Created, with dates')
+rm(MFD_dfm)
+
+save(MFD_df,file='~/Capstone/Data/MFD_df.rda')
+rm(MFD_df)
+notify_me('MFD_df saved')
+
+# plot_GI(MFD_df,'care.virtue','document', UPPERCASE = FALSE)
+# plot_GI(MFD_df,'care.vice','document', UPPERCASE = FALSE)
+# plot_GI(MFD_df,'fairness.virtue','document', UPPERCASE = FALSE)
+# plot_GI(MFD_df,'fairness.vice','document', UPPERCASE = FALSE)
+# plot_GI(MFD_df,'loyalty.virtue','document', UPPERCASE = FALSE)
+# plot_GI(MFD_df,'loyalty.vice','document', UPPERCASE = FALSE)
+# plot_GI(MFD_df,'authority.virtue','document', UPPERCASE = FALSE)
+# plot_GI(MFD_df,'authority.vice','document', UPPERCASE = FALSE)
+# plot_GI(MFD_df,'sanctity.virtue','document', UPPERCASE = FALSE)
+# plot_GI(MFD_df,'sanctity.vice','document', UPPERCASE = FALSE)
+
+```
+
+```{r RID Regressive Imagery Dictionary}
+
+library(quanteda.dictionaries)
+library(quanteda)
+load("~/Capstone/Data/dict_tokens.rda")
+notify_me('Tokens Object loaded')
+
+RID_dfm <- dfm(dict_tokens,
+              remove = c(stopwords('en')),
+              dictionary = data_dictionary_RID)
+
+RID_dfm  <- dfm_weight(RID_dfm,scheme='prop')
+notify_me('RID dfm created')
+
+
+RID_df  <- convert(RID_dfm,to='data.frame')
+RID_df <- RID_df %>% rename('id_str'=document)
+notify_me('RID_df Created, with dates')
+
+
+save(RID_df,file='~/Capstone/Data/RID_df.rda')
+notify_me('RID_df saved')
+load('~/Capstone/Data/RID_df.rda')
+
+all_them_sentiments <- inner_join(RID_df,df_test,by='id_str')
+rm(df_test)
+rm(NRC_df)
+rm(RID_df)
+
+all_them_sentiments <- all_them_sentiments %>%
+  select(id_str,EMOTIONS.POSITIVE_AFFECT,EMOTIONS.ANXIETY,
+         EMOTIONS.SADNESS,EMOTIONS.AFFECTION,
+         EMOTIONS.AGGRESSION,EMOTIONS.EXPRESSIVE_BEH,
+         EMOTIONS.GLORY,anger,
+         anticipation,disgust,
+         fear,joy,sadness,trust,vader)
+
+#if all good then delete dfm
+rm(RID_dfm)
+
+anxiety_pos <- which(RID_dict_df_tweets$EMOTIONS.ANXIETY >.20)
+affection_pos <- which(RID_dict_df_tweets$EMOTIONS.AFFECTION >.25)
+aggression_pos <- which(RID_dict_df_tweets$EMOTIONS.AGGRESSION >.25)
+sadness_pos <- which(RID_dict_df_tweets$EMOTIONS.SADNESS >.25)
+posiaffect_pos <- which(RID_dict_df_tweets$EMOTIONS.POSITIVE_AFFECT>.25)
+
+
+#PLOT POSIAFFECT TO SEE IF THERE IS A TREND
+df_posiaffect <- df[posiaffect_pos,]
+
+df_posiaffect_daily <- df_posiaffect %>%group_by(date) %>% summarise(posiaffect=n())
+
+df_posiaffect_daily$posiaffect <- df_posiaffect_daily$posiaffect/num_docs$peso
+
+plot_GI(df_posiaffect_daily,'posiaffect','date',UPPERCASE = FALSE)
+
+
+
+
+```
+
+
+```{r, GENERAL INQUIRER, cache=TRUE}
+# CREATE GEN INQUIRER AS QUANTEDA DICTIONARY OBJECT
+gen_inquirer_df <- readr::read_csv("~/Downloads/inquireraugmented.csv")
+
+get_inquirer_words <- function(category,df){
+  
+  words <- df$Entry[gen_inquirer_df[category]==category] %>%
+    replace_hash() %>%
+    unique() %>% 
+    tolower()
+  words <- words[2:length(words)]
+  
+  return(words)
+  
+}
+
+
+GI_names <- names(gen_inquirer_df)[3:(length(gen_inquirer_df)-2)]
+
+
+GI_words_list <- list()
+
+  for (i in GI_names){
+    temp_cat <- paste0('GI_',i)
+    GI_words_list[[i]] <- get_inquirer_words(df=gen_inquirer_df,category = i)
+  }
+
+GI_words_list <- Filter(Negate(anyNA), GI_words_list) 
+
+my_GI_dict <- dictionary(GI_words_list)
+
+
+GI_dfm <- dfm(dict_tokens,
+              remove = c(stopwords('en'),'rt','https'),
+              thesaurus = my_GI_dict)
+
+GI_dfm <- GI_dfm[,1:164]
+
+GI_dfm <- GI_dfm[,c("HOSTILE","POWER",'WEAK','PLEASUR','ECON@','LEGAL',"MALE" ,
+                    "FEMALE","SOCIAL","AFFGAIN","AFFLOSS", "AFFPT" , "AFFOTH","AFFTOT",
+                 "WLTPT"  , "WLTTRAN", "WLTOTH","WLTTOT","WLBGAIN",
+                 "WLBLOSS", "WLBPHYS", "WLBPSYC", "WLBPT",
+                 "WLBTOT","POWGAIN", "POWLOSS", "POWENDS", "POWAREN",
+                 "POWCON" , "POWCOOP" ,"POWAUPT","POWPT"  ,
+                 "POWAUTH" ,"POWOTH" , "POWTOT")]
+
+GI_df <- convert(GI_dfm,to='data.frame')
+GI_df$created_at <- docvars(GI_dfm)$created_at
+GI_df$user_county <- docvars(GI_dfm)$user_county
+
+rm(GI_dfm)
+
+save(GI_df,file='~/Capstone/Data/GI_df.rda')
+rm(GI_df)
+notify_me('GI_df created and saved to ~/Capstone/Data/GI_df.rda')
+
+load('~/Capstone/Data/GI_df.rda')
+
+GI_df <- GI_df %>% rename('id_str'=document)
+inner_join(GI_df,all_them_sentiments,by='id_str') %>% nrow()
+all_them_sentiments <- inner_join(GI_df,all_them_sentiments,by='id_str')
+
+
+#----------------------------------------------
+
+```
+
+```{r VADER SENTIMENT FUNCTIONS, eval=FALSE}
+find_range <- function(x,session_num,tot_sessions) { 
+  
+  upper_range <- round(((x/tot_sessions)*session_num))
+  lower_range <- round(1+(x/tot_sessions*(session_num-1)))
+  return(lower_range:upper_range)
+}
+
+get_vader_sentiments <- function (tweets,clust=5) {
+  require(parallel)
+  require(doParallel)
+  require(foreach)
+  myCluster <- makeCluster(clust, # number of cores to use
+                           type = 'PSOCK') # type of cluster
+  
+  registerDoParallel(myCluster)
+
+  temp_list <- c()
+  list <- foreach (i=1:length(tweets),.combine='c') %dopar% {
+    temp_list[i] <- round(sentimentSetsR::getVaderRuleBasedSentiment(tweets[i]),3)
+    }
+  stopCluster(myCluster)
+  message('Finished VADER scoring all sub-session tweets')
+  return(list)
+}
+
+#ls <- list()
+#ranges <- c()
+
+load('~/Capstone/Data/latest_completed_vader.rda')
+start_vader <- Sys.time()
+
+for (j in (latest_completed_vader+1):3000) {
+  
+  sess_start <- Sys.time()
+  sub_text <- df$clean_text[find_range(nrow(df),j,3000)]
+  ranges <- c(ranges,find_range(nrow(df),j,3000))
+  if (j %% 10 ==0){
+    message(paste0(j,"/3000 vader sessions completed"))
+  }
+  ls[[j]] <- get_vader_sentiments(sub_text,clust=7)
+  sess_finish <- Sys.time()
+  latest_completed_vader <- j
+  save(latest_completed_vader,file='~/Capstone/Data/latest_completed_vader.rda')
+  message(sess_start-sess_finish)
+}
+
+vader_seniments <- do.call(c,ls)
+finish_vader <- Sys.time()
+
+save(vader_sentiments,"~/Capstone/Data/vader_sentiments.rda")
+notify_me("Vader Scoring has finished")
+
+vader_df <- data.frame(id_str = df$id_str, 
+                       created_at = df$created_at,
+                       vader_sent = vader_sentiments)
+
+rm(vader_sentiments)
+
+library(DBI)
+SQL_path <- "~/Capstone/Data/SQL_TEXAS_HARVEY.sqlite"
+db <- dbConnect(RSQLite::SQLite(), SQL_path)
+
+dbWriteTable(db,'vader_sentiments',vader_df)
+dbDisconnect(db)
+notify_me("Vader df has been saved to SQL database")
+
+
+
+#POSITIVE VADER VALIDATION
+pos_vader <- which(vader_df$vader_sent>.5)
+pos_vader_ids <- vader_df$id_str[pos_vader]
+posi_vader_pos <- which(df$id_str %in% pos_vader_ids)
+df$text[posi_vader_pos][1:20]
+
+
+#NEGATIVE VADER
+neg_vader <- which(vader_df$vader_sent < -0.5)
+neg_vader_ids <- vader_df$id_str[neg_vader]
+neg_vader_pos <- which(df$id_str %in% neg_vader_ids)
+df$text[neg_vader_pos][20:40]
+```
+
+```{r PLOT vader}
+
+vader_daily <- vader_df %>% group_by(date) %>% summarise(sentiment=mean(vader_sent))
+
+vader_weekly <- vader_df %>%
+  mutate(week=floor_date(as_date(date),unit='week')) %>%
+  group_by(week) %>%
+  summarise(sentiment=mean(vader_sent))
+
+
+vader_daily %>% ggplot(aes(x = as_date(date),y=sentiment)) +
+  geom_line(col='green4') + 
+  geom_smooth(aes(y=sentiment),col='coral3') + 
+  theme_classic() +
+    geom_vline(xintercept = as_date("2017-08-25"), linetype = 4,col='blue') +
+   geom_vline(xintercept = as_date("2016-11-08"), linetype = 4,col='red') 
+
+vader_weekly %>% ggplot(aes(x = week,y=sentiment)) +
+  geom_line(col='green4') + 
+  geom_smooth(aes(y=sentiment),col='green3') + 
+  theme_classic() +
+    geom_vline(xintercept = as_date("2017-08-20"), linetype = 4,col='blue') +
+   geom_vline(xintercept = as_date("2016-11-06"), linetype = 4,col='red') 
+
+
+```
+```{r PLOT GEN INQUIRER RESULTS}
+#ECONOMY 
+plot_GI(GI_df,'ECON@','document')
+
+#affection total
+plot_GI(GI_df,'AFFTOT','document')
+
+#wealth total 
+plot_GI(GI_df,'WLTTOT','document')
+
+#well-being loss
+plot_GI(GI_df,'WLBLOSS','document')
+
+#well-being total
+plot_GI(GI_df,'WLBTOT','document')
+
+#sureness
+plot_GI(GI_df,'QUALITY','document')
+
+#know (Cognitive Orientation)
+plot_GI(GI_df,'KNOW','document')
+
+#persist
+plot_GI(GI_df,'PERSIST','document')
+
+#aquatic
+plot_GI(GI_df,'aquatic','document')
+
+```
+```{r LWIC Business}
+source("~/Capstone/R_code/Real_Deal_Functions.R")
+
+library(DBI)
+SQL_path <- "~/Capstone/Data/SQL_TEXAS_HARVEY.sqlite"
+db <- dbConnect(RSQLite::SQLite(), SQL_path)
+df <- dbGetQuery(db,"SELECT id_str,created_at,clean_text FROM new_target_tweets")
+notify_me('df for LWIC loaded, BOSS')
+dbDisconnect(db)
+
+write.csv(df,file="~/Capstone/Data/LWIC_all_new_target_tweets.csv")
+notify_me('LWIC csv written, BOSS')
+
+lwic_results_daily <- readr::read_csv("~/Documents/LSE/Capstone/Data/LIWC2015 Results (LWICtest).csv") %>%
+  select(-c(`Source (C)`,`Source (A)`)) %>%
+  rename("date"=`Source (B)`)
+
+lwic_results_daily <- lwic_results[2:nrow(lwic_results),]
+
+
+lwic_results_daily %>% ggplot(aes(x=as_date(date),y=anger)) + geom_line() + geom_smooth() + theme_classic()+
+    geom_vline(xintercept = as_date("2017-08-24"), linetype = 4,col='red')
+
+lwic_results_daily %>% ggplot(aes(x=as_date(date),y=sad)) + geom_line() + geom_smooth() + theme_classic()+
+    geom_vline(xintercept = as_date("2017-08-24"), linetype = 4,col='red')
+
+lwic_results_daily %>% ggplot(aes(x=as_date(date),y=social)) + geom_line() + geom_smooth() + theme_classic()+
+    geom_vline(xintercept = as_date("2017-08-24"), linetype = 4,col='red')
+
+lwic_results_daily %>% ggplot(aes(x=as_date(date),y=family)) + geom_line() + geom_smooth() + theme_classic()+
+    geom_vline(xintercept = as_date("2017-08-24"), linetype = 4,col='red')
+
+lwic_results_daily %>% ggplot(aes(x=as_date(date),y=power)) + geom_line() + geom_smooth() + theme_classic()+
+    geom_vline(xintercept = as_date("2017-08-24"), linetype = 4,col='red')
+
+lwic_results_daily %>% ggplot(aes(x=as_date(date),y=focuspast)) + geom_line() + geom_smooth() + theme_classic()+
+    geom_vline(xintercept = as_date("2017-08-24"), linetype = 4,col='red')
+
+lwic_results_daily %>% ggplot(aes(x=as_date(date),y=work)) + geom_line() + geom_smooth() + theme_classic()+
+    geom_vline(xintercept = as_date("2017-08-24"), linetype = 4,col='red')
+
+lwic_results_daily %>% ggplot(aes(x=as_date(date),y=money)) + geom_line() + geom_smooth() + theme_classic()+
+    geom_vline(xintercept = as_date("2017-08-24"), linetype = 4,col='red')
+
+lwic_results_daily %>% ggplot(aes(x=as_date(date),y=health)) + geom_line() + geom_smooth() + theme_classic()+
+    geom_vline(xintercept = as_date("2017-08-24"), linetype = 4,col='red')
+
+lwic_results_daily %>% ggplot(aes(x=as_date(date),y=home)) + geom_line() + geom_smooth() + theme_classic()+
+    geom_vline(xintercept = as_date("2017-08-24"), linetype = 4,col='red')
+
+
+## LWIC results per TWEET
+lwic_df <- readr::read_csv("~/Capstone/Data/LIWC2015 Results (LWIC_all_new_target_tweets.csv).csv")
+
+lwic_df <- lwic_df %>% select(-A) %>% rename('id_str'= B,
+                                             'created_at'= C,
+                                             "clean_text" = D)
+
+lwic_df <- lwic_df %>% select(-c(nonflu,netspeak,assent,filler))
+
+lwic_df$id_str <- lwic_df$id_str %>% as.numeric() %>% as.character()
+lwic_df <- lwic_df %>% rename('word_count'=WC)
+
+library(DBI)
+SQL_path <- "~/Capstone/Data/SQL_TEXAS_HARVEY.sqlite"
+db <- dbConnect(RSQLite::SQLite(), SQL_path)
+dbWriteTable(db,'lwic',lwic_df)
+notify_me('df for LWIC loaded, BOSS')
+dbDisconnect(db)
+
+
+word_count <- lwic_df %>% select(id_str,word_count)
+
+#add word_count to all_them_sentiments
+all_them_sentiments <- inner_join(word_count,all_them_sentiments,by='id_str')
+
+library(DBI)
+SQL_path <- "~/Capstone/Data/SQL_TEXAS_HARVEY.sqlite"
+db <- dbConnect(RSQLite::SQLite(), SQL_path)
+dbWriteTable(db,'vader_GI_RID_NRC',all_them_sentiments)
+notify_me('df vader_GI_RID_NRC has been saved to SQL database, BOSS')
+dbDisconnect(db)
+
+
+lwic_results_tweets$C[lwic_results_tweets$anger > 15][1:20]
+lwic_results_tweets$C[lwic_results_tweets$sad > 15][18] 
+
+
+lwic_results_tweets %>% group_by(date) %>% summarise(sent = mean(sad)) %>% 
+
+plot_GI(cat_name = 'sent',date_var = 'date',UPPERCASE = FALSE)
+
+
+
+```{r}
+
+gg_df <- HuLiu_dict_dfm %>% convert(to='data.frame') %>% 
+  mutate(date=as_date(document),
+         ext_pos=ext_slangDS_dict_dfm[,'ext_pos'] %>% as.vector(),
+         ext_neg=ext_slangDS_dict_dfm[,'ext_neg'] %>% as.vector(),
+         pos_slang=SlangSD_dict_dfm[,'pos_slang'] %>% as.vector(),
+         neg_slang=SlangSD_dict_dfm[,'neg_slang'] %>% as.vector())
+#-----------------------------------------------
+gg_df_week <- gg_df %>% mutate(week=floor_date(date,unit='week')) %>%
+  group_by(week) %>%
+  summarise(positive=mean(positive),
+            negative=mean(negative),
+            ext_pos=mean(ext_pos),
+            ext_neg=mean(ext_neg),
+            neg_slang=mean(neg_slang),
+            pos_slang=mean(pos_slang)) %>% 
+  mutate(all_pos=(positive+pos_slang)/2,all_neg=mean(negative+neg_slang)/2)
+#-----------------------------------------------
+gg_df %>% ggplot(aes(x = date)) +
+  geom_point(aes(y=positive),col='green4') +
+  geom_point(aes(y=negative),col='greenyellow') + 
+  geom_point(aes(y=ext_pos),col='coral3')+ 
+  geom_point(aes(y=ext_neg),col='coral') +
+  geom_point(aes(y=neg_slang),col='blue4') +
+  geom_point(aes(y=pos_slang),col='lightblue') +
+  theme_classic()
+
+#-----------------------------------------------
+gg_df_week %>% ggplot(aes(x = week)) +
+  geom_point(aes(y=positive),col='green4') +
+  geom_point(aes(y=negative),col='greenyellow') + 
+  geom_point(aes(y=ext_pos),col='coral3')+ 
+  geom_point(aes(y=ext_neg),col='coral') +
+  geom_point(aes(y=neg_slang),col='blue4') +
+  geom_point(aes(y=pos_slang),col='lightblue') +
+  theme_classic()
+
+#-----------------------------------------------
+gg_df_week %>% ggplot(aes(x = week)) +
+  geom_line(aes(y=positive),col='green4') +
+  geom_line(aes(y=negative),col='greenyellow') + 
+  geom_line(aes(y=ext_pos),col='coral3')+ 
+  geom_line(aes(y=ext_neg),col='coral') +
+  geom_line(aes(y=neg_slang),col='lightblue') +
+  geom_line(aes(y=pos_slang),col='darkblue') +
+  theme_classic()
+
+#-----------------------------------------------
+gg_df_week %>% ggplot(aes(x = week)) +
+  geom_smooth(aes(y=positive),col='green4') +
+  geom_smooth(aes(y=negative),col='greenyellow') + 
+  geom_smooth(aes(y=ext_pos),col='coral3')+ 
+  geom_smooth(aes(y=ext_neg),col='coral') +
+  geom_smooth(aes(y=neg_slang),col='lightblue') +
+  geom_smooth(aes(y=pos_slang),col='darkblue') +
+  theme_classic()
+
+#-----------------------------------------------
+gg_df %>% ggplot(aes(x = date)) +
+  geom_smooth(aes(y=ext_pos),col='green4') +
+  geom_smooth(aes(y=ext_neg),col='coral3') + 
+  theme_classic() +
+    geom_vline(xintercept = as_date("2017-08-25"), linetype = 4,col='blue') +
+   geom_vline(xintercept = as_date("2016-11-08"), linetype = 4,col='red') 
+  
+```
+
+```{R}
+library(lubridate)
+
+plot_timespan <- function (df,Unit='week', sentiment='anger'){
+  df <- df %>%
+  mutate(week=floor_date(as_date(document),unit=Unit)) %>%
+  group_by(week) %>%
+  summarise(anger=mean(anger),
+            fear=mean(fear),
+            joy=mean(joy),
+            negative=mean(negative),
+            positive=mean(positive),
+            sadness=mean(sadness),
+            surprise=mean(surprise),
+            trust=mean(trust))
+  
+  gg <-  df %>% ggplot(aes(x=week,y=anger)) + geom_smooth(col='red2',model=lm) + geom_smooth(data=df,aes(x=week,y=fear),col='green') +
+    geom_smooth(data=df,aes(x=week,y=sadness),col='blue')+
+    geom_smooth(data=df,aes(x=week,y=surprise),col='yellow')+
+    #geom_line(data=df,aes(x=week,y=positive),col='green4')+
+    geom_vline(xintercept = as_date("2017-08-25"), linetype = 4,col='red') +
+    theme_classic()
+ 
+ return(gg)
+  
+}
+
+weekly_anger %>% ggplot(aes(x=week,y=anger)) + geom_line() + geom_vline(xintercept = as_date("2017-08-25"), linetype = 4,col='red')
+
+
+weekly_anger <- dfm_grouped_NRC %>%
+  mutate(week=floor_date(as_date(document),unit="week")) %>%
+  group_by(week) %>%
+  summarise(anger=sum(anger))
+
+library(ggplot2)
+library(dplyr)
+library(lubridate)
+
+weekly_sentiment <- sent_df_w %>%
+  mutate(week=floor_date(as_date(day),unit="week")) %>%
+  group_by(week) %>%
+  summarise(sentiment=sum(sentiment))
+
+quarterly_sentiment <- sent_df_w %>%
+  mutate(Q=floor_date(as_date(day),unit="quarter")) %>%
+  group_by(Q) %>%
+  summarise(sentiment=sum(sentiment))
+
+
+sent_df %>% ggplot(aes(x=day,y=sentiment)) + geom_point() + geom_vline(xintercept = as.POSIXct("2017-08-25 12:00:00 UTC"), linetype = 4,col='blue')
+
+sent_df_w %>% ggplot(aes(x=day,y=sentiment)) + geom_line() + geom_vline(xintercept = as_date("2017-08-25"), linetype = 4,col='red') + theme_classic()
+
+weekly_sentiment %>% ggplot(aes(x=week,y=sentiment)) + geom_smooth(model=lm) + geom_vline(xintercept = as_date("2017-08-25"), linetype = 4,col='red') + theme_classic()
+            
+
+```

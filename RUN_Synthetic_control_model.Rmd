@@ -1,0 +1,893 @@
+---
+title: "Synthetic Control Model (SCM)"
+author: "Andres Ignacio"
+date: "7/25/2019"
+output:
+  pdf_document: default
+  html_document: default
+editor_options:
+  chunk_output_type: console
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = FALSE, cache = TRUE)
+## for processing C++ code
+require(Rcpp) 
+## for plotting
+require(ggplot2)  
+require(GGally) 
+## for parallel computing 
+require(doParallel) 
+require(abind) 
+library(gsynth)
+#devtools::install_github('xuyiqing/panelView') 
+library(panelView)
+#install.packages("gsynth", repos = "http://cran.us.r-project.org")
+source("~/Library/Mobile Documents/com~apple~CloudDocs/Capstone/R_code/Prepare_4_Synthetic.R")
+options(scipen=999)
+
+```
+
+```{r echo=FALSE}
+
+plot_result_ct <- function (ST=NULL) { 
+  # get results vectors from GSYNTH output object
+  data <- result$Y.bar %>% as.data.frame()
+  # pre-process dataframe for plotting
+  data$week <- row.names(data) %>% as.numeric()
+  data <- data %>% select(Y.ct.bar,Y.tr.bar,week)
+  colnames(data) <- c('ct','tr','week')
+  data <- reshape2::melt(data,id='week')
+  colnames(data) <- c('week','type','outcome')
+  #create ggplot object
+  gg <- plot(result,'ct',theme.bw=T,
+             main=paste0("Treated and Counterfactual (",toupper(metric),")")) 
+  #add layers of smooth lines for ease of trend comparison
+  gg <- gg + stat_smooth(data=subset(data,week>52),
+                   aes(week,outcome,group=type,color=type),se=FALSE) +
+    labs(subtitle = ST, x='Week')
+  return(gg)
+}
+
+save_pics<- function(iter_count,Metric=metric){
+
+require(png)
+  path <- "~/Library/Mobile Documents/com~apple~CloudDocs/Capstone/Figures/gsynth/"
+  pic_name<- paste0(path,Metric,"_gap.png")
+png(pic_name,units="in", width=8, height=5,res=1200, pointsize = 14)
+plot(result, main=metric,theme.bw = TRUE)
+  dev.off()
+  
+  pic_name2 <- paste0(path,Metric,"_ct.png")
+png(pic_name2,units="in", width=8, height=5,res=1200, pointsize = 14)
+plot_result_ct()
+  dev.off()
+}
+
+
+get_metrics_vector <- function(sent_name=metric){
+  data <- result$Y.bar %>% as.data.frame()
+  data$week <- row.names(data) %>% as.numeric()
+    cor_dat <- data %>%  filter(week < 52)
+    correlation <- round(cor(cor_dat$Y.tr.bar,cor_dat$Y.ct.bar),3)
+    #compute relative effect ATT to estimated ground mean
+    relative_effect <- round(result$att.avg/result$mu*100,3)
+    result$est.avg[3]
+    #create metrics vector
+    metrics_vector <- data.frame(ATT.avg=result$est.avg[1],
+                        mu=result$mu,
+                        rel.eff=relative_effect,
+                        SE=result$est.avg[2],
+                        CI.lower=result$est.avg[3],
+                        CI.upper=result$est.avg[4],
+                        p.value=result$est.avg[5],
+                        cor.pt=correlation,
+                        MSPE=result$MSPE,
+                        R.MSPE=sqrt(result$MSPE))
+    metrics_vector <- round(metrics_vector,3)
+    metrics_vector$name <- sent_name
+    return(metrics_vector)
+}
+    
+ls <- list()
+iter_count <- 1
+
+```
+
+```{r}
+#VADER 
+source("~/Library/Mobile Documents/com~apple~CloudDocs/Capstone/R_code/Prepare_4_Synthetic.R")
+
+#load sentiment scores from SQL database
+library(DBI)
+setwd("~/Library/Mobile Documents/com~apple~CloudDocs/Capstone/")
+SQL_path <- "Data/SQL_TEXAS_HARVEY.sqlite"
+db <- dbConnect(RSQLite::SQLite(), SQL_path)
+
+df <- dbGetQuery(db,"SELECT id_str,created_at,user_county, vader
+                 FROM vader_GI_RID_NRC")
+dbDisconnect(db)
+
+#add covariates and change date formats before running GSYNTH
+df <- synthetic_df(df)
+
+#aggreagte sentiment scores at the week level
+metric <- "vader"
+df_week <- prepare_2_run_week_G(df,metric,MT=F)
+
+#RUN IT 
+message(paste("Starting GSYNTH estimation process for",toupper(metric)))
+result <- get_gsynth_estimate(df_week,botas=5000)
+notify_me('vader_gsynth FINISHED')
+
+result$est.avg
+plot(result, main=metric)
+plot_result_ct()
+
+#Save plots to png file
+require(png)
+  path <- "~/Library/Mobile Documents/com~apple~CloudDocs/Capstone/Figures/gsynth/"
+  pic_name<- paste0(path,metric,"_gap.png")
+    png(pic_name,units="in", width=8, height=5,res=1200, pointsize = 14)
+    plot(result, main=metric,theme.bw = TRUE)
+  dev.off()
+  
+  pic_name2 <- paste0(path,metric,"_ct.png")
+    png(pic_name2,units="in", width=8, height=5,res=1200, pointsize = 14)
+    plot_result_ct()
+  dev.off()
+
+ls[[1]] <- get_metrics_vector(sent_name = metric) 
+
+
+```
+
+```{r}
+setwd("~/Library/Mobile Documents/com~apple~CloudDocs/Capstone")
+library(DBI)
+SQL_path <- "Data/SQL_TEXAS_HARVEY.sqlite"
+db <- dbConnect(RSQLite::SQLite(), SQL_path)
+
+df <- dbGetQuery(db,"SELECT id_str,created_at,user_county,
+`EMOTIONS.ANXIETY` AS anxiety
+FROM vader_GI_RID_NRC")
+
+dbDisconnect(db)
+
+metric <- "anxiety"
+
+df <- synthetic_df(df)
+
+df_week <- prepare_2_run_week_G(df,metric,controls=8,MT=FALSE)
+message(paste("Starting GSYNTH estimation process for",toupper(metric)))
+result <- get_gsynth_estimate(df_week,botas=7000)
+notify_me('Gsynth FINISHED')
+
+result$est.avg
+result$est.beta
+plot(result, main=metric)
+
+plot_result_ct()
+
+
+require(png)
+  path <- "~/Library/Mobile Documents/com~apple~CloudDocs/Capstone/Figures/gsynth/"
+  pic_name<- paste0(path,metric,"_gap.png")
+    png(pic_name,units="in", width=8, height=5,res=1200, pointsize = 14)
+    plot(result, main=metric,theme.bw = TRUE)
+  dev.off()
+  
+  pic_name2 <- paste0(path,metric,"_ct.png")
+    png(pic_name2,units="in", width=8, height=5,res=1200, pointsize = 14)
+    plot_result_ct()
+  dev.off()
+
+
+ls[[2]] <- get_metrics_vector(sent_name = metric) 
+```
+
+
+```{r}
+SQL_path <- "Data/SQL_TEXAS_HARVEY.sqlite"
+db <- dbConnect(RSQLite::SQLite(), SQL_path)
+df <- dbGetQuery(db,"SELECT id_str,created_at,user_county,
+`EMOTIONS.AFFECTION` AS affection
+FROM vader_GI_RID_NRC")
+
+dbDisconnect(db)
+
+metric <- "affection"
+
+options
+df <- synthetic_df(df)
+
+
+df_week <- prepare_2_run_week_G(df,metric,controls=3,MT=F)
+
+message(paste("Starting GSYNTH estimation process for",toupper(metric)))
+result <- get_gsynth_estimate(df_week,botas=5000)
+notify_me('Gsynth FINISHED')
+
+result$est.avg
+plot(result, main=metric)
+plot_result_ct()
+
+require(png)
+  path <- "~/Library/Mobile Documents/com~apple~CloudDocs/Capstone/Figures/gsynth/"
+  pic_name<- paste0(path,metric,"_gap.png")
+    png(pic_name,units="in", width=8, height=5,res=1200, pointsize = 14)
+    plot(result, main=metric,theme.bw = TRUE)
+  dev.off()
+  
+  pic_name2 <- paste0(path,metric,"_ct.png")
+    png(pic_name2,units="in", width=8, height=5,res=1200, pointsize = 14)
+    plot_result_ct()
+  dev.off()
+ls[[3]] <- get_metrics_vector(sent_name = metric) 
+iter_count <- iter_count + 1
+```
+
+
+
+```{r}
+SQL_path <- "Data/SQL_TEXAS_HARVEY.sqlite"
+db <- dbConnect(RSQLite::SQLite(), SQL_path)
+df <- dbGetQuery(db,"SELECT id_str,created_at,user_county,fear
+FROM vader_GI_RID_NRC")
+
+dbDisconnect(db)
+
+metric <- "fear"
+
+df <- synthetic_df(df)
+
+df_week <- prepare_2_run_week_G(df,metric,controls=5,MT=FALSE)
+message(paste("Starting GSYNTH estimation process for",toupper(metric)))
+result <- get_gsynth_estimate(df_week,botas=6000)
+notify_me('Gsynth FINISHED')
+
+result$est.avg
+plot(result, main=metric)
+
+plot_result_ct()
+
+require(png)
+  path <- "~/Library/Mobile Documents/com~apple~CloudDocs/Capstone/Figures/gsynth/"
+  pic_name<- paste0(path,metric,"_gap.png")
+    png(pic_name,units="in", width=8, height=5,res=1200, pointsize = 14)
+    plot(result, main=metric,theme.bw = TRUE)
+  dev.off()
+  
+  pic_name2 <- paste0(path,metric,"_ct.png")
+    png(pic_name2,units="in", width=8, height=5,res=1200, pointsize = 14)
+    plot_result_ct()
+  dev.off()
+ls[[4]] <- get_metrics_vector(sent_name = metric) 
+iter_count <- iter_count + 1
+```
+
+
+```{r}
+SQL_path <- "Data/SQL_TEXAS_HARVEY.sqlite"
+db <- dbConnect(RSQLite::SQLite(), SQL_path)
+df <- dbGetQuery(db,"SELECT id_str,created_at,user_county,anger
+FROM vader_GI_RID_NRC")
+
+dbDisconnect(db)
+
+metric <- "anger"
+
+df <- synthetic_df(df)
+
+df_week <- prepare_2_run_week_G(df,metric,controls=20,MT=FALSE)
+message(paste("Starting GSYNTH estimation process for",toupper(metric)))
+result <- get_gsynth_estimate(df_week,botas=6000)
+notify_me('Gsynth FINISHED')
+
+result$est.avg
+plot(result, main=metric)
+
+plot_result_ct()
+require(png)
+  path <- "~/Library/Mobile Documents/com~apple~CloudDocs/Capstone/Figures/gsynth/"
+  pic_name<- paste0(path,metric,"_gap.png")
+    png(pic_name,units="in", width=8, height=5,res=1200, pointsize = 14)
+    plot(result, main=metric,theme.bw = TRUE)
+  dev.off()
+  
+  pic_name2 <- paste0(path,metric,"_ct.png")
+    png(pic_name2,units="in", width=8, height=5,res=1200, pointsize = 14)
+    plot_result_ct()
+  dev.off()
+ls[[5]] <- get_metrics_vector(sent_name = metric) 
+iter_count <- iter_count + 1
+```
+
+```{r}
+SQL_path <- "Data/SQL_TEXAS_HARVEY.sqlite"
+db <- dbConnect(RSQLite::SQLite(), SQL_path)
+df <- dbGetQuery(db,"SELECT id_str,created_at,user_county,sadness
+FROM vader_GI_RID_NRC")
+
+dbDisconnect(db)
+
+metric <- "sadness"
+
+df <- synthetic_df(df)
+
+df_week <- prepare_2_run_week_G(df,metric,controls=20,MT=FALSE)
+
+
+message(paste("Starting GSYNTH estimation process for",toupper(metric)))
+result <- get_gsynth_estimate(df_week,botas=7000)
+notify_me('Gsynth FINISHED')
+
+result$est.avg
+plot(result, main=metric)
+
+plot_result_ct()
+
+require(png)
+  path <- "~/Library/Mobile Documents/com~apple~CloudDocs/Capstone/Figures/gsynth/"
+  pic_name<- paste0(path,metric,"_gap.png")
+    png(pic_name,units="in", width=8, height=5,res=1200, pointsize = 14)
+    plot(result, main=metric,theme.bw = TRUE)
+  dev.off()
+  
+  pic_name2 <- paste0(path,metric,"_ct.png")
+    png(pic_name2,units="in", width=8, height=5,res=1200, pointsize = 14)
+    plot_result_ct()
+  dev.off()
+ls[[6]] <- get_metrics_vector(sent_name = metric) 
+iter_count <- iter_count + 1
+```
+
+```{r}
+SQL_path <- "Data/SQL_TEXAS_HARVEY.sqlite"
+db <- dbConnect(RSQLite::SQLite(), SQL_path)
+df <- dbGetQuery(db,"SELECT id_str,created_at,user_county,
+`EMOTIONS.AGGRESSION` as agression
+FROM vader_GI_RID_NRC")
+
+metric <- "agression"
+
+df <- synthetic_df(df)
+
+df_week <- prepare_2_run_week_G(df,metric,controls=3,MT=FALSE)
+
+message(paste("Starting GSYNTH estimation process for",toupper(metric)))
+result <- get_gsynth_estimate(df_week,botas=10000)
+notify_me('Gsynth FINISHED')
+
+result$est.avg
+plot(result, main=metric)
+plot_result_ct()
+require(png)
+  path <- "~/Library/Mobile Documents/com~apple~CloudDocs/Capstone/Figures/gsynth/"
+  pic_name<- paste0(path,metric,"_gap.png")
+    png(pic_name,units="in", width=8, height=5,res=1200, pointsize = 14)
+    plot(result, main=metric,theme.bw = TRUE)
+  dev.off()
+  
+  pic_name2 <- paste0(path,metric,"_ct.png")
+    png(pic_name2,units="in", width=8, height=5,res=1200, pointsize = 14)
+    plot_result_ct()
+  dev.off()
+  
+  
+ls[[7]] <- get_metrics_vector(sent_name = metric) 
+iter_count <- iter_count + 1
+```
+
+
+```{r}
+#load("~/Library/Mobile Documents/com~apple~CloudDocs/Capstone/Data/Lwic_df.rda")
+
+library(DBI)
+setwd("~/Library/Mobile Documents/com~apple~CloudDocs/Capstone")
+SQL_path <- "Data/SQL_TEXAS_HARVEY.sqlite"
+db <- dbConnect(RSQLite::SQLite(), SQL_path)
+
+df <- dbGetQuery(db,"SELECT P.ids as id_str, L.negemo, M.user_county, M.created_at
+                   FROM [lwic] L
+                   JOIN socio_econ_preds P ON 
+                   L.id_str=P.ids
+                   JOIN new_target_tweets M ON 
+                   M.id_str=L.id_str
+                 WHERE P.prediction > 0.5")
+
+metric <- "negemo"
+plot_title <- paste(metric,"LWIC - SOCIOECON")
+
+df <- synthetic_df(df)
+
+df_week <- prepare_2_run_week_G(df,metric,controls=8,MT=FALSE)
+message(paste("Starting GSYNTH estimation process for",toupper(metric)))
+result <- get_gsynth_estimate(df_week,botas=5000)
+notify_me('Gsynth FINISHED')
+
+result$est.avg
+plot(result, main=plot_title)
+
+plot_result_ct()
+
+Metric <- 'negemo_SE'
+require(png)
+  path <- "~/Library/Mobile Documents/com~apple~CloudDocs/Capstone/Figures/gsynth/"
+  pic_name<- paste0(path,Metric,"_gap.png")
+    png(pic_name,units="in", width=8, height=5,res=1200, pointsize = 14)
+    plot(result, main=Metric,theme.bw = TRUE)
+  dev.off()
+  
+  pic_name2 <- paste0(path,Metric,"_ct.png")
+    png(pic_name2,units="in", width=8, height=5,res=1200, pointsize = 14)
+    plot_result_ct()
+  dev.off()
+ls[[8]] <- get_metrics_vector(sent_name = 'negemo_SE') 
+iter_count <- iter_count + 1
+```
+
+```{r}
+library(DBI)
+setwd("~/Library/Mobile Documents/com~apple~CloudDocs/Capstone")
+SQL_path <- "Data/SQL_TEXAS_HARVEY.sqlite"
+db <- dbConnect(RSQLite::SQLite(), SQL_path)
+
+dbListTables(db)
+
+df <- dbGetQuery(db,"SELECT P.ids as id_str, L.posemo, M.user_county, M.created_at
+                   FROM [lwic] L
+                   JOIN socio_econ_preds P ON 
+                   L.id_str=P.ids
+                   JOIN new_target_tweets M ON 
+                   M.id_str=L.id_str
+                 WHERE P.prediction > 0.5")
+
+metric <- "posemo"
+plot_title <- paste(metric,"LWIC - SOCIOECON")
+
+df <- synthetic_df(df)
+
+df_week <- prepare_2_run_week_G(df,metric,controls=4,MT=FALSE)
+message(paste("Starting GSYNTH estimation process for",toupper(metric)))
+result <- get_gsynth_estimate(df_week,botas=10000)
+notify_me('Gsynth FINISHED')
+
+result$est.avg
+plot(result, main=plot_title)
+
+plot_result_ct(ST=plot_title) 
+
+Metric <- 'posemo_SE'
+require(png)
+  path <- "~/Library/Mobile Documents/com~apple~CloudDocs/Capstone/Figures/gsynth/"
+  pic_name<- paste0(path,Metric,"_gap.png")
+    png(pic_name,units="in", width=8, height=5,res=1200, pointsize = 14)
+    plot(result, main=Metric,theme.bw = TRUE)
+  dev.off()
+  
+  pic_name2 <- paste0(path,Metric,"_ct.png")
+    png(pic_name2,units="in", width=8, height=5,res=1200, pointsize = 14)
+    plot_result_ct()
+  dev.off()
+ls[[9]] <- get_metrics_vector(sent_name = 'posemo_SE') 
+iter_count <- iter_count + 1
+```
+
+```{r}
+
+library(DBI)
+setwd("~/Library/Mobile Documents/com~apple~CloudDocs/Capstone")
+SQL_path <- "Data/SQL_TEXAS_HARVEY.sqlite"
+db <- dbConnect(RSQLite::SQLite(), SQL_path)
+
+dbListTables(db)
+
+df <- dbGetQuery(db,"SELECT P.ids as id_str, L.Tone, M.user_county, M.created_at
+                   FROM [lwic] L
+                   JOIN socio_econ_preds P ON 
+                   L.id_str=P.ids
+                   JOIN new_target_tweets M ON 
+                   M.id_str=L.id_str
+                 WHERE P.prediction > 0.5")
+
+dbDisconnect(db)
+
+metric <- "Tone"
+plot_title <- paste(metric,"LWIC - SOCIOECON")
+
+df <- synthetic_df(df)
+
+df_week <- prepare_2_run_week_G(df,metric,controls=15,MT=FALSE)
+message(paste("Starting GSYNTH estimation process for",toupper(metric)))
+result <- get_gsynth_estimate(df_week,botas=7000)
+notify_me('Gsynth FINISHED')
+
+result$est.avg
+plot(result, main=plot_title)
+plot_result_ct() 
+
+
+Metric <- 'Tone_SE'
+require(png)
+  path <- "~/Library/Mobile Documents/com~apple~CloudDocs/Capstone/Figures/gsynth/"
+  pic_name<- paste0(path,Metric,"_gap.png")
+    png(pic_name,units="in", width=8, height=5,res=1200, pointsize = 14)
+    plot(result, main=Metric,theme.bw = TRUE)
+  dev.off()
+  
+  pic_name2 <- paste0(path,Metric,"_ct.png")
+    png(pic_name2,units="in", width=8, height=5,res=1200, pointsize = 14)
+    plot_result_ct()
+  dev.off()
+  
+  
+ls[[10]] <- get_metrics_vector(sent_name = 'Tone_SE') 
+iter_count <- iter_count + 1
+```
+
+
+```{r}
+library(DBI)
+setwd("~/Library/Mobile Documents/com~apple~CloudDocs/Capstone")
+SQL_path <- "Data/SQL_TEXAS_HARVEY.sqlite"
+db <- dbConnect(RSQLite::SQLite(), SQL_path)
+
+dbListTables(db)
+
+df <- dbGetQuery(db,"SELECT P.ids as id_str, S.vader, M.user_county, M.created_at
+                   FROM [vader_GI_RID_NRC] S
+                   JOIN socio_econ_preds P ON 
+                   S.id_str=P.ids
+                   JOIN new_target_tweets M ON 
+                   M.id_str=S.id_str
+                 WHERE P.prediction > 0.5")
+
+dbDisconnect(db)
+
+metric <- "vader"
+plot_title <- paste(metric,"LWIC - SOCIOECON")
+
+df <- synthetic_df(df)
+
+df_week <- prepare_2_run_week_G(df,metric,controls=10,MT=F)
+
+
+message(paste("Starting GSYNTH estimation process for",toupper(metric)))
+result <- get_gsynth_estimate(df_week,botas=6000)
+notify_me('Gsynth FINISHED')
+
+result$est.avg
+plot(result, main=plot_title)
+plot_result_ct() 
+
+Metric <- 'vader_SE'
+require(png)
+  path <- "~/Library/Mobile Documents/com~apple~CloudDocs/Capstone/Figures/gsynth/"
+  pic_name<- paste0(path,Metric,"_gap.png")
+    png(pic_name,units="in", width=8, height=5,res=1200, pointsize = 14)
+    plot(result, main=Metric,theme.bw = TRUE)
+  dev.off()
+  
+  pic_name2 <- paste0(path,Metric,"_ct.png")
+    png(pic_name2,units="in", width=8, height=5,res=1200, pointsize = 14)
+    plot_result_ct()
+  dev.off()
+ls[[11]] <- get_metrics_vector(sent_name = 'vader_SE') 
+iter_count <- iter_count + 1
+
+```
+
+```{r}
+
+#not run yet
+library(DBI)
+setwd("~/Library/Mobile Documents/com~apple~CloudDocs/Capstone")
+SQL_path <- "Data/SQL_TEXAS_HARVEY.sqlite"
+db <- dbConnect(RSQLite::SQLite(), SQL_path)
+
+df <- dbGetQuery(db,"SELECT L.Tone, M.user_county, M.created_at
+                   FROM [lwic] L
+                   JOIN new_target_tweets M ON 
+                   M.id_str=L.id_str")
+
+dbDisconnect(db)
+
+metric <- "Tone"
+plot_title <- paste(metric,"LWIC - ALL")
+
+df <- synthetic_df(df)
+
+df_week <- prepare_2_run_week_G(df,metric,controls=8,MT=F)
+message(paste("Starting GSYNTH estimation process for",toupper(metric)))
+result <- get_gsynth_estimate(df_week,botas=12000)
+notify_me('Gsynth FINISHED')
+
+result$est.avg
+plot(result, main=plot_title)
+
+plot_result_ct()  
+
+require(png)
+  path <- "~/Library/Mobile Documents/com~apple~CloudDocs/Capstone/Figures/gsynth/"
+  pic_name<- paste0(path,metric,"_gap.png")
+    png(pic_name,units="in", width=8, height=5,res=1200, pointsize = 14)
+    plot(result, main=metric,theme.bw = TRUE)
+  dev.off()
+  
+  pic_name2 <- paste0(path,metric,"_ct.png")
+    png(pic_name2,units="in", width=8, height=5,res=1200, pointsize = 14)
+    plot_result_ct()
+  dev.off()
+ls[[12]] <- get_metrics_vector(sent_name = metric) 
+iter_count <- iter_count + 1
+
+```
+
+```{r}
+library(DBI)
+setwd("~/Library/Mobile Documents/com~apple~CloudDocs/Capstone")
+SQL_path <- "Data/SQL_TEXAS_HARVEY.sqlite"
+db <- dbConnect(RSQLite::SQLite(), SQL_path)
+
+df <- dbGetQuery(db,"SELECT L.anx, M.user_county, M.created_at
+                   FROM [lwic] L
+                   JOIN new_target_tweets M ON 
+                   M.id_str=L.id_str")
+
+dbDisconnect(db)
+
+metric <- "anx"
+plot_title <- paste(metric,"LWIC - ALL")
+
+df <- synthetic_df(df)
+
+df_week <- prepare_2_run_week_G(df,metric,controls=8,MT=FALSE)
+message(paste("Starting GSYNTH estimation process for",toupper(metric)))
+result <- get_gsynth_estimate(df_week,botas=10000)
+notify_me('Gsynth FINISHED')
+
+result$est.avg
+plot(result, main=plot_title)
+
+plot_result_ct()  
+
+require(png)
+  path <- "~/Library/Mobile Documents/com~apple~CloudDocs/Capstone/Figures/gsynth/"
+  pic_name<- paste0(path,metric,"_gap.png")
+    png(pic_name,units="in", width=8, height=5,res=1200, pointsize = 14)
+    plot(result, main=metric,theme.bw = TRUE)
+  dev.off()
+  
+  pic_name2 <- paste0(path,metric,"_ct.png")
+    png(pic_name2,units="in", width=8, height=5,res=1200, pointsize = 14)
+    plot_result_ct()
+  dev.off()
+ls[[13]] <- get_metrics_vector(sent_name = metric) 
+iter_count <- iter_count + 1
+```
+
+```{r}
+library(DBI)
+setwd("~/Library/Mobile Documents/com~apple~CloudDocs/Capstone")
+SQL_path <- "Data/SQL_TEXAS_HARVEY.sqlite"
+db <- dbConnect(RSQLite::SQLite(), SQL_path)
+dbListFields(db,'lwic')
+df <- dbGetQuery(db,"SELECT L.sad, M.user_county, M.created_at
+                   FROM [lwic] L
+                   JOIN new_target_tweets M ON 
+                   M.id_str=L.id_str")
+
+dbDisconnect(db)
+
+metric <- "sad"
+plot_title <- paste(metric,"LWIC - ALL")
+
+df <- synthetic_df(df)
+
+df_week <- prepare_2_run_week_G(df,metric,controls=8,MT=FALSE)
+
+message(paste("Starting GSYNTH estimation process for",toupper(metric)))
+result <- get_gsynth_estimate(df_week,botas=10000)
+notify_me('Gsynth FINISHED')
+
+result$est.avg
+plot(result, main=plot_title)
+
+plot_result_ct()  
+
+require(png)
+  path <- "~/Library/Mobile Documents/com~apple~CloudDocs/Capstone/Figures/gsynth/"
+  pic_name<- paste0(path,metric,"_gap.png")
+    png(pic_name,units="in", width=8, height=5,res=1200, pointsize = 14)
+    plot(result, main=metric,theme.bw = TRUE)
+  dev.off()
+  
+  pic_name2 <- paste0(path,metric,"_ct.png")
+    png(pic_name2,units="in", width=8, height=5,res=1200, pointsize = 14)
+    plot_result_ct()
+  dev.off()
+ls[[14]] <- get_metrics_vector(sent_name = metric) 
+iter_count <- iter_count + 1
+```
+
+```{r}
+library(DBI)
+setwd("~/Library/Mobile Documents/com~apple~CloudDocs/Capstone")
+SQL_path <- "Data/SQL_TEXAS_HARVEY.sqlite"
+db <- dbConnect(RSQLite::SQLite(), SQL_path)
+dbListFields(db,'lwic')
+df <- dbGetQuery(db,"SELECT L.relig, M.user_county, M.created_at
+                   FROM [lwic] L
+                   JOIN new_target_tweets M ON 
+                   M.id_str=L.id_str")
+
+dbDisconnect(db)
+
+metric <- "relig"
+plot_title <- paste(metric,"LWIC - ALL")
+
+df <- synthetic_df(df)
+
+df_week <- prepare_2_run_week_G(df,metric,controls=8,MT=FALSE)
+message(paste("Starting GSYNTH estimation process for",toupper(metric)))
+result <- get_gsynth_estimate(df_week,botas=10000)
+notify_me('Gsynth FINISHED')
+
+result$est.avg
+plot(result, main=plot_title)
+
+plot_result_ct()  
+
+require(png)
+  path <- "~/Library/Mobile Documents/com~apple~CloudDocs/Capstone/Figures/gsynth/"
+  pic_name<- paste0(path,metric,"_gap.png")
+    png(pic_name,units="in", width=8, height=5,res=1200, pointsize = 14)
+    plot(result, main=metric,theme.bw = TRUE)
+  dev.off()
+  
+  pic_name2 <- paste0(path,metric,"_ct.png")
+    png(pic_name2,units="in", width=8, height=5,res=1200, pointsize = 14)
+    plot_result_ct()
+  dev.off()
+ls[[15]] <- get_metrics_vector(sent_name = metric) 
+iter_count <- iter_count + 1
+```
+
+```{r}
+library(DBI)
+setwd("~/Library/Mobile Documents/com~apple~CloudDocs/Capstone")
+SQL_path <- "Data/SQL_TEXAS_HARVEY.sqlite"
+db <- dbConnect(RSQLite::SQLite(), SQL_path)
+dbListFields(db,'lwic')
+df <- dbGetQuery(db,"SELECT L.focuspast, M.user_county, M.created_at
+                   FROM [lwic] L
+                   JOIN new_target_tweets M ON 
+                   M.id_str=L.id_str")
+
+dbDisconnect(db)
+
+metric <- "focuspast"
+plot_title <- paste(metric,"LWIC - ALL")
+
+df <- synthetic_df(df)
+
+df_week <- prepare_2_run_week_G(df,metric,controls=8,MT=FALSE)
+message(paste("Starting GSYNTH estimation process for",toupper(metric)))
+result <- get_gsynth_estimate(df_week,botas=10000)
+notify_me('Gsynth FINISHED')
+
+result$est.avg
+plot(result, main=plot_title)
+
+plot_result_ct()  
+require(png)
+  path <- "~/Library/Mobile Documents/com~apple~CloudDocs/Capstone/Figures/gsynth/"
+  pic_name<- paste0(path,metric,"_gap.png")
+    png(pic_name,units="in", width=8, height=5,res=1200, pointsize = 14)
+    plot(result, main=metric,theme.bw = TRUE)
+  dev.off()
+  
+  pic_name2 <- paste0(path,metric,"_ct.png")
+    png(pic_name2,units="in", width=8, height=5,res=1200, pointsize = 14)
+    plot_result_ct()
+  dev.off()
+ls[[16]] <- get_metrics_vector(sent_name = metric) 
+iter_count <- iter_count + 1
+
+```
+
+```{r}
+library(DBI)
+setwd("~/Library/Mobile Documents/com~apple~CloudDocs/Capstone")
+SQL_path <- "Data/SQL_TEXAS_HARVEY.sqlite"
+db <- dbConnect(RSQLite::SQLite(), SQL_path)
+
+df <- dbGetQuery(db,"SELECT L.friend, M.user_county, M.created_at
+                   FROM [lwic] L
+                   JOIN new_target_tweets M ON 
+                   M.id_str=L.id_str")
+
+dbDisconnect(db)
+
+metric <- "friend"
+plot_title <- paste(metric,"LWIC - ALL")
+
+df <- synthetic_df(df)
+
+df_week <- prepare_2_run_week_G(df,metric,controls=10,MT=FALSE)
+message(paste("Starting GSYNTH estimation process for",toupper(metric)))
+result <- get_gsynth_estimate(df_week,botas=10000)
+notify_me('Gsynth FINISHED')
+
+result$est.avg
+plot(result, main=plot_title)
+
+plot_result_ct()
+
+require(png)
+  path <- "~/Library/Mobile Documents/com~apple~CloudDocs/Capstone/Figures/gsynth/"
+  pic_name<- paste0(path,metric,"_gap.png")
+    png(pic_name,units="in", width=8, height=5,res=1200, pointsize = 14)
+    plot(result, main=metric,theme.bw = TRUE)
+  dev.off()
+  
+  pic_name2 <- paste0(path,metric,"_ct.png")
+    png(pic_name2,units="in", width=8, height=5,res=1200, pointsize = 14)
+    plot_result_ct()
+  dev.off()
+ls[[17]] <- get_metrics_vector(sent_name = metric) 
+iter_count <- iter_count + 1
+```
+
+```{r}
+library(DBI)
+setwd("~/Library/Mobile Documents/com~apple~CloudDocs/Capstone")
+SQL_path <- "Data/SQL_TEXAS_HARVEY.sqlite"
+db <- dbConnect(RSQLite::SQLite(), SQL_path)
+
+df <- dbGetQuery(db,"SELECT L.family, M.user_county, M.created_at
+                   FROM [lwic] L
+                   JOIN new_target_tweets M ON 
+                   M.id_str=L.id_str")
+
+dbDisconnect(db)
+
+metric <- "family"
+plot_title <- paste(metric,"LWIC - ALL")
+
+df <- synthetic_df(df)
+
+df_week <- prepare_2_run_week_G(df,metric,controls=15,MT=FALSE)
+message(paste("Starting GSYNTH estimation process for",toupper(metric)))
+result <- get_gsynth_estimate(df_week,botas=10000)
+notify_me('Gsynth FINISHED')
+
+result$est.avg
+plot(result, main=plot_title)
+
+plot_result_ct()
+
+require(png)
+  path <- "~/Library/Mobile Documents/com~apple~CloudDocs/Capstone/Figures/gsynth/"
+  pic_name<- paste0(path,metric,"_gap.png")
+    png(pic_name,units="in", width=8, height=5,res=1200, pointsize = 14)
+    plot(result, main=metric,theme.bw = TRUE)
+  dev.off()
+  
+  pic_name2 <- paste0(path,metric,"_ct.png")
+    png(pic_name2,units="in", width=8, height=5,res=1200, pointsize = 14)
+    plot_result_ct()
+  dev.off()
+ls[[18]] <- get_metrics_vector(sent_name = metric) 
+iter_count <- iter_count + 1
+```
+
+```{r}
+metrics_df <- do.call(rbind,ls)
+
+save(metrics_df,file='~/Library/Mobile Documents/com~apple~CloudDocs/Capstone/Data/gsynth/metrics_table_1.rda')
+
+write.csv(metrics_df,file="~/Library/Mobile Documents/com~apple~CloudDocs/Capstone/Data/gsynth/model_metrics.csv")
+```
+
